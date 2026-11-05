@@ -307,9 +307,15 @@ def show_paper_text(text, heading):
         st.write(translated)
         with st.expander(heading + ' 영어 원문 보기'):
             st.write(text)
-    except Exception:
-        garden_note('번역을 불러오지 못해 영어 원문을 표시합니다. '
-                    '잠시 뒤 생물 원리 찾기를 다시 누르면 재시도합니다.')
+    except ModuleNotFoundError as error:
+        st.error('번역 라이브러리가 설치되지 않았습니다. '
+                 'requirements.txt에 deep-translator를 넣고 저장해 주세요.')
+        st.code(f'{type(error).__name__}: {error}', language='text')
+        st.write(text)
+    except Exception as error:
+        garden_note('번역 요청에 실패해 영어 원문을 표시합니다.')
+        with st.expander('번역 실패 원인 확인', expanded=True):
+            st.code(f'{type(error).__name__}: {error}', language='text')
         st.write(text)
 
 
