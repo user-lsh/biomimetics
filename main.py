@@ -586,4 +586,4 @@ with st.expander('데이터와 검색 방식'):
     st.write('자료 공개: NASA PeTaL / 생물 전략 자료 기반: AskNature. 이 앱은 NASA 또는 AskNature의 공식 서비스가 아닙니다.')
     st.link_button('생물 원리 JSON', JSON_URL)
     st.link_button('기능 CSV', FUNCTION_URL)
-    st.link_button('논문 CSV', PAPER_URL) 기능의 단어로 찾은 결과는 관련성이 넓을 수 있습니다.')
+        st.link_button('논문 CSV', PAPER_URL)
