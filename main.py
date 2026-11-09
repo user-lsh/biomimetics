@@ -16,7 +16,7 @@ JSON_URL = BASE + 'bio-strategy-extractor/main/asknature-data.json'
 PAPER_URL = BASE + 'nasa_petal_snorkel/main/labeled_data.csv'
 FUNCTION_URL = BASE + 'nasa_petal_snorkel/main/biomimicry_functions_enumerated.csv'
 
-# 기능 코드: (한국어 이름, 문제 표현, 영어 검색 표현, 활용 방향)
+# 기능 코드: (한국어 이름, 문제 표현, 원문 검색 표현, 활용 방향)
 RULES = {
     'attach_permanently': ('영구 접착', '접착|붙이|붙는|붙게|안 붙|떨어지', 'adhesi|adhere|glue|cement', '접착 구조나 물질을 참고한 접합 방식'),
     'attach_temporarily': ('일시적 부착', '탈부착|뗐다|떼었다|붙였다|흡착', 'temporary adhesion|reversible adhesion|suction|attach', '반복하여 붙이고 떼는 부착 방식'),
@@ -40,7 +40,7 @@ RULES = {
     'store_energy': ('에너지 저장', '에너지 저장|전기 저장|배터리', 'store.*energy|energy stor', '에너지를 저장하는 구조나 방식'),
 }
 
-# CSV의 function_enumerated 번호 0~99에 대응하는 한국어 이름입니다.
+# 원본 CSV의 기능 번호 0~99에 대응하는 한국어 이름입니다.
 FUNCTION_KO = """영구적으로 붙이기
 일시적으로 붙이기
 고체를 수동적으로 이동시키기
@@ -142,7 +142,7 @@ FUNCTION_KO = """영구적으로 붙이기
 위장·의태하기
 크기·모양 바꾸기""".splitlines()
 
-# 원문에서 확인할 수 있는 생물 이름입니다.
+# 원문에서 확인되는 생물 이름을 한국어로 표시합니다.
 NAMES = {
     'mussels?': '홍합', 'geckos?': '도마뱀붙이', 'lotus': '연꽃',
     'cicadas?': '매미', 'sharks?': '상어', 'pomelos?': '포멜로',
@@ -204,7 +204,7 @@ def load_data():
     if not {'function', 'function_enumerated'}.issubset(functions.columns):
         raise ValueError('기능 CSV의 열 이름이 변경되었습니다.')
 
-    # 논문 다운로드만 실패해도 생물 원리 검색은 사용할 수 있습니다.
+    # 논문만 불러오지 못한 경우에도 생물 원리 검색은 사용할 수 있습니다.
     paper_error = ''
     try:
         papers = pd.read_csv(io.BytesIO(download(PAPER_URL))).fillna('')
@@ -220,7 +220,7 @@ def load_data():
 
 
 def classify(problem, codes):
-    # 한국어 키워드가 일치하는 수로 기능 후보를 정합니다.
+    # 한국어 키워드의 일치 수로 기능 후보를 찾습니다.
     scores = []
     for code, (_, korean, _, _) in RULES.items():
         count = sum(word in problem.lower() for word in korean.split('|'))
@@ -244,7 +244,7 @@ def find_records(records, code, extra, papers):
         if hits and (not extra or extra.lower() in text):
             names = organism_names(row['summary'])
             related = find_papers(papers, code, row['summary'])
-            # 생물명, 문헌, 관련 논문을 더 많이 제공할 수 있는 후보를 먼저 표시합니다.
+            # 제공할 수 있는 정보의 종류가 많은 후보를 위에 표시합니다.
             detail_count = sum((bool(names), bool(row['excerpt']), bool(related)))
             results.append((detail_count, hits, row, names, related))
 
@@ -284,7 +284,7 @@ def find_papers(papers, code, summary):
 
 @st.cache_resource
 def translation_state():
-    # 같은 앱을 사용하는 사람들의 요청도 하나씩 순서대로 처리합니다.
+    # 같은 앱에서 발생하는 번역 요청을 하나씩 처리합니다.
     import threading
     return {'lock': threading.Lock(), 'next_time': 0.0,
             'blocked_until': 0.0, 'translations': {}}
@@ -298,14 +298,15 @@ def translate_korean(text):
 
     if not text.strip():
         return ''
+
     state = translation_state()
     chunks = textwrap.wrap(text, width=4500, break_long_words=True,
                            break_on_hyphens=False, replace_whitespace=False)
     translated = []
 
     for chunk in chunks:
-        # 잠금 안에서 저장된 번역을 확인해 동시 중복 요청도 막습니다.
         with state['lock']:
+            # 이미 번역한 내용은 서버에 다시 요청하지 않습니다.
             if chunk in state['translations']:
                 translated.append(state['translations'][chunk])
                 continue
@@ -313,7 +314,7 @@ def translate_korean(text):
             now = time.monotonic()
             if now < state['blocked_until']:
                 seconds = int(state['blocked_until'] - now) + 1
-                raise RuntimeError(f'번역 요청이 제한되었습니다. 약 {seconds}초 뒤 다시 검색해 주세요.')
+                raise RuntimeError(f'번역 요청이 제한되었습니다. 약 {seconds}초 뒤 다시 시도해 주세요.')
 
             delay = state['next_time'] - now
             if delay > 0:
@@ -331,10 +332,9 @@ def translate_korean(text):
                     '잠시 뒤 번역하기 버튼을 다시 눌러 주세요.'
                 ) from error
             finally:
-                # 응답을 받은 뒤에도 1.5초를 기다려 다음 요청을 보냅니다.
+                # 응답을 받은 뒤 다음 요청까지 1.5초 간격을 둡니다.
                 state['next_time'] = time.monotonic() + 1.5
 
-            # 성공한 번역만 저장합니다.
             state['translations'][chunk] = result
             if len(state['translations']) > 2000:
                 oldest = next(iter(state['translations']))
@@ -346,13 +346,12 @@ def translate_korean(text):
 
 def show_paper(paper, shared, widget_key):
     import hashlib
-
     title = str(paper['title'])
     abstract = str(paper['abstract'])
     paper_id = hashlib.sha256((title + '\n' + abstract).encode()).hexdigest()
     saved = st.session_state.setdefault('paper_translations', {})
 
-    # 처음에는 원문만 표시합니다.
+    # 처음에는 영어 원문을 표시합니다.
     st.markdown('**논문 제목 · 영어 원문**')
     st.write(title)
     st.markdown('**논문 초록 · 영어 원문**')
@@ -368,7 +367,7 @@ def show_paper(paper, shared, widget_key):
     st.caption('선택한 기능 라벨 일치 · 원문 공통 단어: ' + ', '.join(sorted(shared)))
     st.caption('관련 연구 후보이며, 위 생물 원리의 직접 근거인지 원문 확인이 필요합니다.')
 
-    # 이 버튼을 눌렀을 때만 번역을 요청합니다.
+    # 버튼을 눌렀을 때만 해당 논문을 번역합니다.
     if paper_id not in saved:
         if st.button('🌐 한국어로 번역하기', key=widget_key):
             try:
@@ -382,7 +381,6 @@ def show_paper(paper, shared, widget_key):
                 garden_note('번역 요청을 완료하지 못했습니다.')
                 st.caption(str(error))
 
-    # 다른 버튼을 눌러 화면이 다시 실행되어도 번역본을 유지합니다.
     if paper_id in saved:
         korean_title, korean_abstract = saved[paper_id]
         st.markdown('**🌱 한국어 번역**')
@@ -421,12 +419,50 @@ st.markdown("""
 
 
 def garden_note(message):
-    # 정보가 없거나 확인되지 않았을 때는 옅은 색으로 안내합니다.
+    # 자료가 없거나 확인되지 않았을 때는 옅은 색으로 표시합니다.
     st.markdown(
         '<p class="garden-note">🍂 ' + html.escape(message) + '</p>',
         unsafe_allow_html=True,
     )
 
+
+# 첫 화면에서 문제를 입력한 뒤 완료 버튼으로 다음 화면에 이동합니다.
+st.session_state.setdefault('page', 'input')
+st.session_state.setdefault('submitted_problem', '')
+
+if st.session_state['page'] == 'input':
+    st.caption('🌱 1단계 · 해결하고 싶은 문제 작성')
+
+    with st.form('problem_form'):
+        draft = st.text_area(
+            '해결하고 싶은 실생활 문제',
+            value=st.session_state['submitted_problem'],
+            placeholder='예: 비가 오면 신발이 젖어요.',
+            max_chars=1000,
+        )
+        done = st.form_submit_button('완료 · 다음으로 →', type='primary')
+
+    if done:
+        if not draft.strip():
+            st.warning('해결하고 싶은 문제를 먼저 작성해 주세요.')
+        else:
+            st.session_state['submitted_problem'] = draft.strip()
+            st.session_state.pop('search_results', None)
+            st.session_state.pop('search_context', None)
+            st.session_state['page'] = 'results'
+            st.rerun()
+
+    st.stop()
+
+# 다음 화면에서 문제를 다시 작성하는 화면으로 돌아갈 수 있습니다.
+st.caption('🍃 2단계 · 기능 확인과 아이디어 탐색')
+if st.button('← 문제 다시 작성하기'):
+    st.session_state['page'] = 'input'
+    st.rerun()
+
+problem = st.session_state['submitted_problem']
+st.markdown('**내가 해결하고 싶은 문제**')
+st.write(problem)
 
 st.caption('논문은 영어 원문으로 표시됩니다. 원하는 논문의 한국어로 번역하기 버튼을 눌러 보세요.')
 
@@ -448,10 +484,8 @@ if paper_error:
         st.cache_data.clear()
         st.rerun()
 
-problem = st.text_area('해결하고 싶은 실생활 문제', placeholder='예: 비가 오면 신발이 젖어요. / 물건을 떨어뜨려도 깨지지 않게 하고 싶어요.', max_chars=1000)
+# 기능의 영어 코드를 한국어 이름과 연결합니다.
 codes = functions['function'].astype(str).tolist()
-
-# 기능 선택창에는 한국어를 표시하고 검색에는 영어 코드를 사용합니다.
 function_labels = {}
 for _, function_row in functions.iterrows():
     number = int(function_row['function_enumerated'])
@@ -469,12 +503,12 @@ def label(code):
     return function_labels.get(code, '기능 번역 준비 중')
 
 
-# 문제를 입력하기 전에는 기능 선택창을 숨깁니다.
 if not problem.strip():
     st.session_state.pop('search_results', None)
     st.session_state.pop('search_context', None)
     st.stop()
 
+# 분류가 불확실할 때만 기능 선택창을 표시합니다.
 if uncertain:
     garden_note('필요한 기능을 자동으로 정하기 어려워요. 아래 목록에서 직접 골라 주세요.')
     if ranked:
@@ -491,7 +525,7 @@ else:
 
 extra = st.text_input('선택 사항: 결과를 좁힐 영어 단어', placeholder='예: mussel, wet, lotus (요약에 이 표현이 있는 자료만 표시)')
 
-# 번역 버튼을 눌러도 검색 결과가 사라지지 않도록 보관합니다.
+# 번역 버튼을 눌러도 검색 결과가 유지되도록 세션에 보관합니다.
 context = (problem.strip(), selected, extra.strip())
 if st.session_state.get('search_context') != context:
     st.session_state.pop('search_results', None)
@@ -552,4 +586,4 @@ with st.expander('데이터와 검색 방식'):
     st.write('자료 공개: NASA PeTaL / 생물 전략 자료 기반: AskNature. 이 앱은 NASA 또는 AskNature의 공식 서비스가 아닙니다.')
     st.link_button('생물 원리 JSON', JSON_URL)
     st.link_button('기능 CSV', FUNCTION_URL)
-    st.link_button('논문 CSV', PAPER_URL)
+    st.link_button('논문 CSV', PAPER_URL) 기능의 단어로 찾은 결과는 관련성이 넓을 수 있습니다.')
