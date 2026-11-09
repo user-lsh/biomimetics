@@ -10,13 +10,13 @@ from urllib.parse import urlparse
 import pandas as pd
 import streamlit as st
 
-# 유료 API 없이, 한국어 표현을 영어 기능과 연결하여 검색합니다.
+# 데이터 주소
 BASE = 'https://raw.githubusercontent.com/nasa-petal/'
 JSON_URL = BASE + 'bio-strategy-extractor/main/asknature-data.json'
 PAPER_URL = BASE + 'nasa_petal_snorkel/main/labeled_data.csv'
 FUNCTION_URL = BASE + 'nasa_petal_snorkel/main/biomimicry_functions_enumerated.csv'
 
-# 기능 코드: (한국어 이름, 문제 표현, 원문 검색 표현, 활용 방향)
+# 기능 코드: (한국어 이름, 문제 표현, 영어 검색 표현, 활용 방향)
 RULES = {
     'attach_permanently': ('영구 접착', '접착|붙이|붙는|붙게|안 붙|떨어지', 'adhesi|adhere|glue|cement', '접착 구조나 물질을 참고한 접합 방식'),
     'attach_temporarily': ('일시적 부착', '탈부착|뗐다|떼었다|붙였다|흡착', 'temporary adhesion|reversible adhesion|suction|attach', '반복하여 붙이고 떼는 부착 방식'),
@@ -142,7 +142,7 @@ FUNCTION_KO = """영구적으로 붙이기
 위장·의태하기
 크기·모양 바꾸기""".splitlines()
 
-# 원문에서 확인할 수 있는 생물 이름을 한국어로 표시합니다.
+# 원문에서 확인할 수 있는 생물 이름입니다.
 NAMES = {
     'mussels?': '홍합', 'geckos?': '도마뱀붙이', 'lotus': '연꽃',
     'cicadas?': '매미', 'sharks?': '상어', 'pomelos?': '포멜로',
@@ -156,7 +156,7 @@ NAMES = {
 
 
 def clean(value):
-    # 문헌 발췌문의 HTML 태그와 불필요한 공백을 없앱니다.
+    # HTML 태그와 불필요한 공백을 제거합니다.
     return re.sub(r'\s+', ' ', html.unescape(re.sub(r'<[^>]+>', ' ', str(value)))).strip()
 
 
@@ -178,7 +178,7 @@ def download(url):
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def load_data():
-    # 실제 JSON은 두 개의 병렬 목록입니다. 같은 번호의 항목을 연결합니다.
+    # JSON의 두 목록에서 같은 번호의 요약과 문헌 발췌문을 연결합니다.
     raw = json.loads(download(JSON_URL))
     if not isinstance(raw, dict):
         raise ValueError('JSON의 최상위 구조가 변경되었습니다.')
@@ -187,6 +187,7 @@ def load_data():
         raise ValueError('summary 또는 source_excerpt 목록이 없습니다.')
     if len(summaries) != len(excerpts):
         raise ValueError('요약과 문헌 발췌문의 개수가 다릅니다.')
+
     records, seen = [], set()
     for index, (summary, excerpt) in enumerate(zip(summaries, excerpts)):
         if not isinstance(summary, str):
@@ -198,10 +199,12 @@ def load_data():
         parts = excerpt if isinstance(excerpt, list) else [excerpt]
         records.append({'id': index, 'summary': summary,
                         'excerpt': '\n\n'.join(clean(p) for p in parts if p)})
+
     functions = pd.read_csv(io.BytesIO(download(FUNCTION_URL))).fillna('')
     if not {'function', 'function_enumerated'}.issubset(functions.columns):
         raise ValueError('기능 CSV의 열 이름이 변경되었습니다.')
-    # 논문만 다운로드에 실패해도 생물 원리 검색은 사용할 수 있습니다.
+
+    # 논문 다운로드만 실패해도 생물 원리 검색은 사용할 수 있습니다.
     paper_error = ''
     try:
         papers = pd.read_csv(io.BytesIO(download(PAPER_URL))).fillna('')
@@ -210,13 +213,14 @@ def load_data():
     except Exception as error:
         papers = pd.DataFrame()
         paper_error = str(error)
+
     if not records or functions.empty:
         raise ValueError('필수 데이터가 비어 있습니다.')
     return records, functions, papers, paper_error
 
 
 def classify(problem, codes):
-    # 한국어 키워드가 일치하는 수로 기능 후보를 찾습니다.
+    # 한국어 키워드가 일치하는 수로 기능 후보를 정합니다.
     scores = []
     for code, (_, korean, _, _) in RULES.items():
         count = sum(word in problem.lower() for word in korean.split('|'))
@@ -226,13 +230,13 @@ def classify(problem, codes):
 
 
 def find_records(records, code, extra, papers):
-    # 기능과 연결되는 후보 중 제공할 정보가 많은 순서로 정렬합니다.
     pattern = RULES.get(code, ('', '', '', ''))[2]
     if not pattern:
         words = [w for w in code.split('_') if len(w) > 3]
         pattern = '|'.join(re.escape(w) for w in words)
     if not pattern:
         return []
+
     results = []
     for row in records:
         text = row['summary'].lower()
@@ -240,8 +244,10 @@ def find_records(records, code, extra, papers):
         if hits and (not extra or extra.lower() in text):
             names = organism_names(row['summary'])
             related = find_papers(papers, code, row['summary'])
+            # 생물명, 문헌, 관련 논문을 더 많이 제공할 수 있는 후보를 먼저 표시합니다.
             detail_count = sum((bool(names), bool(row['excerpt']), bool(related)))
             results.append((detail_count, hits, row, names, related))
+
     results.sort(key=lambda result: (-result[0], -result[1]))
     return results[:5]
 
@@ -276,52 +282,119 @@ def find_papers(papers, code, summary):
     return sorted(matches, key=lambda item: -item[0])[:3]
 
 
-@st.cache_data(ttl=604800, max_entries=1000, show_spinner=False)
+@st.cache_resource
+def translation_state():
+    # 같은 앱을 사용하는 사람들의 요청도 하나씩 순서대로 처리합니다.
+    import threading
+    return {'lock': threading.Lock(), 'next_time': 0.0,
+            'blocked_until': 0.0, 'translations': {}}
+
+
 def translate_korean(text):
-    # 성공한 번역만 저장합니다. 실패한 번역은 다음 검색 때 재시도합니다.
+    import time
+    import textwrap
     from deep_translator import GoogleTranslator
+    from deep_translator.exceptions import TooManyRequests
+
     if not text.strip():
         return ''
-    # 번역 서비스의 요청 길이 제한에 맞춰 긴 초록을 나눕니다.
+    state = translation_state()
     chunks = textwrap.wrap(text, width=4500, break_long_words=True,
                            break_on_hyphens=False, replace_whitespace=False)
-    translator = GoogleTranslator(source='en', target='ko')
     translated = []
+
     for chunk in chunks:
-        result = translator.translate(chunk)
-        if not result or (result.strip() == chunk.strip()
-                          and re.search(r'[A-Za-z]{4,}', chunk)):
-            raise ValueError('번역 결과를 받지 못했습니다.')
-        translated.append(result)
+        # 잠금 안에서 저장된 번역을 확인해 동시 중복 요청도 막습니다.
+        with state['lock']:
+            if chunk in state['translations']:
+                translated.append(state['translations'][chunk])
+                continue
+
+            now = time.monotonic()
+            if now < state['blocked_until']:
+                seconds = int(state['blocked_until'] - now) + 1
+                raise RuntimeError(f'번역 요청이 제한되었습니다. 약 {seconds}초 뒤 다시 검색해 주세요.')
+
+            delay = state['next_time'] - now
+            if delay > 0:
+                time.sleep(delay)
+
+            try:
+                result = GoogleTranslator(source='en', target='ko').translate(chunk)
+                if not result or (result.strip() == chunk.strip()
+                                  and re.search(r'[A-Za-z]{4,}', chunk)):
+                    raise ValueError('한국어 번역 결과를 받지 못했습니다.')
+            except TooManyRequests as error:
+                state['blocked_until'] = time.monotonic() + 60
+                raise RuntimeError(
+                    '번역 요청 제한으로 1분 동안 추가 요청을 멈췄습니다. '
+                    '잠시 뒤 번역하기 버튼을 다시 눌러 주세요.'
+                ) from error
+            finally:
+                # 응답을 받은 뒤에도 1.5초를 기다려 다음 요청을 보냅니다.
+                state['next_time'] = time.monotonic() + 1.5
+
+            # 성공한 번역만 저장합니다.
+            state['translations'][chunk] = result
+            if len(state['translations']) > 2000:
+                oldest = next(iter(state['translations']))
+                del state['translations'][oldest]
+            translated.append(result)
+
     return '\n\n'.join(translated)
 
 
-def show_paper_text(text, heading):
-    st.markdown('**' + heading + '**')
-    if not text.strip():
-        garden_note(heading + ' 자료가 없습니다.')
-        return
-    try:
-        with st.spinner(heading + '을 한국어로 번역하고 있어요…'):
-            translated = translate_korean(text)
-        st.write(translated)
-        with st.expander(heading + ' 영어 원문 보기'):
-            st.write(text)
-    except ModuleNotFoundError as error:
-        st.error('번역 라이브러리가 설치되지 않았습니다. '
-                 'requirements.txt에 deep-translator를 넣고 저장해 주세요.')
-        st.code(f'{type(error).__name__}: {error}', language='text')
-        st.write(text)
-    except Exception as error:
-        garden_note('번역 요청에 실패해 영어 원문을 표시합니다.')
-        with st.expander('번역 실패 원인 확인', expanded=True):
-            st.code(f'{type(error).__name__}: {error}', language='text')
-        st.write(text)
+def show_paper(paper, shared, widget_key):
+    import hashlib
+
+    title = str(paper['title'])
+    abstract = str(paper['abstract'])
+    paper_id = hashlib.sha256((title + '\n' + abstract).encode()).hexdigest()
+    saved = st.session_state.setdefault('paper_translations', {})
+
+    # 처음에는 원문만 표시합니다.
+    st.markdown('**논문 제목 · 영어 원문**')
+    st.write(title)
+    st.markdown('**논문 초록 · 영어 원문**')
+    if abstract.strip():
+        st.write(abstract)
+    else:
+        garden_note('초록이 없는 논문입니다.')
+
+    url = safe_url(paper['url']) or (safe_url('https://doi.org/' + paper['doi']) if paper['doi'] else '')
+    if url:
+        st.link_button('논문 링크', url)
+
+    st.caption('선택한 기능 라벨 일치 · 원문 공통 단어: ' + ', '.join(sorted(shared)))
+    st.caption('관련 연구 후보이며, 위 생물 원리의 직접 근거인지 원문 확인이 필요합니다.')
+
+    # 이 버튼을 눌렀을 때만 번역을 요청합니다.
+    if paper_id not in saved:
+        if st.button('🌐 한국어로 번역하기', key=widget_key):
+            try:
+                with st.spinner('선택한 논문을 번역하고 있어요…'):
+                    korean_title = translate_korean(title)
+                    korean_abstract = translate_korean(abstract)
+                saved[paper_id] = (korean_title, korean_abstract)
+            except ModuleNotFoundError:
+                garden_note('requirements.txt에 deep-translator를 추가해 주세요.')
+            except Exception as error:
+                garden_note('번역 요청을 완료하지 못했습니다.')
+                st.caption(str(error))
+
+    # 다른 버튼을 눌러 화면이 다시 실행되어도 번역본을 유지합니다.
+    if paper_id in saved:
+        korean_title, korean_abstract = saved[paper_id]
+        st.markdown('**🌱 한국어 번역**')
+        st.write(korean_title)
+        if korean_abstract:
+            st.write(korean_abstract)
+        st.caption('자동 번역입니다. 전문 용어와 학명은 영어 원문도 확인하세요.')
 
 
 st.set_page_config(page_title='생체모방 아이디어 제안', page_icon='🌿', layout='wide')
 
-# 식물 테마 디자인과 자료가 없을 때 사용하는 옅은 안내 문구입니다.
+# 식물 테마 디자인
 st.markdown("""
 <style>
 .block-container {max-width: 980px; padding-top: 3rem;}
@@ -348,13 +421,15 @@ st.markdown("""
 
 
 def garden_note(message):
+    # 정보가 없거나 확인되지 않았을 때는 옅은 색으로 안내합니다.
     st.markdown(
         '<p class="garden-note">🍂 ' + html.escape(message) + '</p>',
         unsafe_allow_html=True,
     )
 
 
-st.caption('생물 원리는 원문으로 확인하고, 논문 제목과 초록은 한국어 자동 번역으로 읽을 수 있어요.')
+st.caption('논문은 영어 원문으로 표시됩니다. 원하는 논문의 한국어로 번역하기 버튼을 눌러 보세요.')
+
 try:
     with st.spinner('생체모방 데이터를 불러오는 중입니다…'):
         records, functions, papers, paper_error = load_data()
@@ -376,7 +451,7 @@ if paper_error:
 problem = st.text_area('해결하고 싶은 실생활 문제', placeholder='예: 비가 오면 신발이 젖어요. / 물건을 떨어뜨려도 깨지지 않게 하고 싶어요.', max_chars=1000)
 codes = functions['function'].astype(str).tolist()
 
-# 화면에는 한국어를 표시하고, 검색에는 원래 영어 기능 코드를 사용합니다.
+# 기능 선택창에는 한국어를 표시하고 검색에는 영어 코드를 사용합니다.
 function_labels = {}
 for _, function_row in functions.iterrows():
     number = int(function_row['function_enumerated'])
@@ -394,8 +469,10 @@ def label(code):
     return function_labels.get(code, '기능 번역 준비 중')
 
 
-# 입력하기 전에는 기능 선택창을 숨깁니다.
+# 문제를 입력하기 전에는 기능 선택창을 숨깁니다.
 if not problem.strip():
+    st.session_state.pop('search_results', None)
+    st.session_state.pop('search_context', None)
     st.stop()
 
 if uncertain:
@@ -413,9 +490,20 @@ else:
     st.success('🌱 자동으로 정한 기능 · ' + label(selected))
 
 extra = st.text_input('선택 사항: 결과를 좁힐 영어 단어', placeholder='예: mussel, wet, lotus (요약에 이 표현이 있는 자료만 표시)')
+
+# 번역 버튼을 눌러도 검색 결과가 사라지지 않도록 보관합니다.
+context = (problem.strip(), selected, extra.strip())
+if st.session_state.get('search_context') != context:
+    st.session_state.pop('search_results', None)
+    st.session_state['search_context'] = context
+
 if st.button('🌱 생물 원리 찾기', type='primary', disabled=not selected):
+    st.session_state['search_results'] = find_records(records, selected, extra.strip(), papers)
+
+if 'search_results' in st.session_state:
     st.subheader('🍃 추천 아이디어')
-    results = find_records(records, selected, extra.strip(), papers)
+    results = st.session_state['search_results']
+
     if not results:
         garden_note('조건과 연결되는 원리를 찾지 못했습니다. 기능을 다시 선택하거나 영어 검색어를 줄여 보세요.')
     else:
@@ -451,20 +539,12 @@ if st.button('🌱 생물 원리 찾기', type='primary', disabled=not selected)
                     garden_note('발췌문이 없어요.')
                 st.caption('원본 JSON에는 문헌별 URL이 별도 항목으로 제공되지 않습니다.')
 
-            st.markdown('**관련 연구 후보 — 한국어 제목과 초록**')
-            if related:
-                st.caption('무료 자동 번역 · 전문 용어와 학명은 영어 원문도 함께 확인하세요.')
+            st.markdown('**관련 연구 후보**')
             if not related:
                 garden_note('관련 연구를 찾지 못했습니다.' if not paper_error else '논문 데이터를 불러오지 못해 확인할 수 없습니다.')
 
-            for _, paper, shared in related:
-                url = safe_url(paper['url']) or (safe_url('https://doi.org/' + paper['doi']) if paper['doi'] else '')
-                show_paper_text(str(paper['title']), '논문 제목')
-                st.caption('선택한 기능 라벨 일치 · 원문 공통 단어: ' + ', '.join(sorted(shared)))
-                st.caption('내용상 관련성을 추가로 확인해야 하는 후보이며, 위 생물 원리의 직접 근거임을 보장하지 않습니다.')
-                if url:
-                    st.link_button('논문 링크', url)
-                show_paper_text(str(paper['abstract']), '논문 초록')
+            for paper_index, (_, paper, shared) in enumerate(related):
+                show_paper(paper, shared, f'paper_{row["id"]}_{paper_index}')
 
 with st.expander('데이터와 검색 방식'):
     st.write(f'중복 제거 원리 {len(records):,}개 · 기능 {len(functions)}개 · 논문 {len(papers)}개')
